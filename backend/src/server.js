@@ -168,13 +168,22 @@ app.delete('/api/admin/services/:id', auth, requireRole('SA', 'OWNER'), async (r
 });
 
 app.get('/api/admin/revenue', auth, requireRole('SA', 'OWNER'), async (_, res) => {
-  const result = await pool.query(`select sp.id, sp.full_name, coalesce(sum(case when b.status='paid' then b.price else 0 end),0) as total,
+  const result = await pool.query(`with worker_groups as (
+      select min(sp.id) as id, sp.full_name, array_agg(sp.id) as specialist_ids
+      from specialists sp
+      where sp.is_active=true
+      group by coalesce(sp.user_id, sp.id), sp.full_name
+    )
+    select wg.id, wg.full_name, coalesce(sum(case when b.status='paid' then b.price else 0 end),0) as total,
       coalesce(sum(case when b.status='paid' and b.paid_at::date=current_date then b.price else 0 end),0) as today,
       count(b.id) filter (where b.starts_at::date=current_date and b.status <> 'cancelled') as today_jobs,
-      coalesce(json_agg(json_build_object('id', b.id, 'service', sv.name, 'starts_at', b.starts_at, 'price', b.price, 'payment', pm.name, 'status', b.status)) filter (where b.id is not null), '[]') as jobs
-    from specialists sp left join bookings b on b.specialist_id=sp.id left join services sv on sv.id=b.service_id left join payment_methods pm on pm.id=b.payment_method_id
-    where sp.is_active=true
-    group by sp.id order by sp.full_name`);
+      coalesce(json_agg(json_build_object('id', b.id, 'service', sv.name, 'starts_at', b.starts_at, 'price', b.price, 'payment', pm.name, 'status', b.status) order by b.starts_at desc) filter (where b.id is not null), '[]') as jobs
+    from worker_groups wg
+    left join bookings b on b.specialist_id=any(wg.specialist_ids)
+    left join services sv on sv.id=b.service_id
+    left join payment_methods pm on pm.id=b.payment_method_id
+    group by wg.id, wg.full_name
+    order by wg.full_name`);
   res.json(result.rows);
 });
 
@@ -217,7 +226,13 @@ app.patch('/api/me', auth, async (req, res) => {
 });
 
 app.post('/api/quotes/ai', auth, upload.single('image'), async (req, res) => {
-  const payload = await quoteDesign({ hints: req.body.hints || '', image: req.file });
+  const [servicesResult, specialistsResult] = await Promise.all([
+    pool.query('select s.name, s.description, s.base_price, s.duration_minutes, c.name as category from services s left join categories c on c.id=s.category_id where s.is_active=true order by s.name'),
+    pool.query(`select sp.full_name, coalesce(array_agg(c.name) filter (where c.id is not null), '{}') as categories
+      from specialists sp left join specialist_categories sc on sc.specialist_id=sp.id left join categories c on c.id=sc.category_id
+      where sp.is_active=true group by sp.id order by sp.full_name`),
+  ]);
+  const payload = await quoteDesign({ hints: req.body.hints || '', image: req.file, services: servicesResult.rows, specialists: specialistsResult.rows });
   const result = await pool.query(
     'insert into ai_quotes (user_id, hints, difficulty, estimated_minutes, price, materials, requires_review) values ($1,$2,$3,$4,$5,$6,$7) returning id',
     [req.user.id, req.body.hints || null, payload.difficulty, payload.estimatedMinutes, payload.price, JSON.stringify(payload.materials), payload.requiresReview]

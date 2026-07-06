@@ -126,38 +126,63 @@ function localAssistantReply({ message, services = [], products = [] }) {
   return 'Claro, puedo ayudarte con productos, precios, diseños y reservas. Cuéntame qué color, estilo u ocasión tienes en mente y reviso las opciones disponibles.';
 }
 
-function fallbackQuote(hints = '') {
+function pickQuoteCategory(hints = '') {
+  const lower = String(hints).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (/rulo|rulos|onda|ondas|peinad|lacead|recogid|cabello|pelo/.test(lower)) return 'Peinados';
+  if (/maquill|makeup|novia|rostro|pestana|ceja/.test(lower)) return 'Maquillaje';
+  if (/uña|unas|unha|acrilic|gel|manicure|nail|esmalte/.test(lower)) return 'Uñas';
+  return 'Otros';
+}
+
+function pickSpecialistForCategory(category, specialists = []) {
+  const normalized = String(category || '').toLowerCase();
+  const match = specialists.find((sp) => (sp.categories || []).some((name) => String(name).toLowerCase() === normalized));
+  return match?.full_name || null;
+}
+
+function fallbackQuote(hints = '', specialists = []) {
   const lower = String(hints).toLowerCase();
-  const high = /piedra|3d|boda|relieve|espejo|cristal|encapsulado|chrome/.test(lower);
+  const category = pickQuoteCategory(hints);
+  const high = /piedra|3d|boda|relieve|espejo|cristal|encapsulado|chrome|novia/.test(lower);
+  const isHair = category === 'Peinados';
+  const price = isHair ? (high ? 75 : 45) : high ? 150 : 95;
+  const estimatedMinutes = isHair ? (high ? 90 : 60) : high ? 135 : 95;
+  const recommendedSpecialist = pickSpecialistForCategory(category, specialists);
   return {
     difficulty: high ? 'Alta' : 'Media',
-    estimatedMinutes: high ? 135 : 95,
-    price: high ? 150 : 95,
-    materials: ['Acrílico', 'Nail Art', 'Esmalte permanente', high ? 'Piedras' : 'Brillo'],
-    explanation: high ? 'Cotización preliminar por complejidad alta; el salón revisará el precio antes de confirmar.' : 'Cotización preliminar automática basada en descripción y reglas de precio.',
-    requiresReview: high,
+    estimatedMinutes,
+    price,
+    category: category || 'Otros',
+    recommendedSpecialist: recommendedSpecialist || 'por confirmar',
+    materials: isHair ? ['Referencia visual', 'Styling', high ? 'Acabado para evento' : 'Fijación'] : ['Acrílico', 'Nail Art', 'Esmalte permanente', high ? 'Piedras' : 'Brillo'],
+    explanation: `Cotización preliminar según la referencia. Podría valer aproximadamente ${money(price)}, pero para asegurar el monto final genera una reserva y confirma el precio con ${recommendedSpecialist || 'la trabajadora asignada'}.`,
+    requiresReview: true,
     source: 'fallback',
   };
 }
 
-async function quoteDesign({ hints, image }) {
-  const schemaHint = 'Devuelve solo JSON válido con: difficulty string (Baja, Media, Alta o Especial), estimatedMinutes number, price number en soles peruanos, materials array de strings, explanation string breve, requiresReview boolean.';
-  const prompt = `Actúa como cotizadora experta de un salón de manicure y nail art en Perú. Analiza la imagen y/o descripción, detecta tipo de uñas, longitud, colores, nail art, piedras, relieves y complejidad. Descripción: ${hints || 'Sin descripción adicional'}`;
+async function quoteDesign({ hints, image, services = [], specialists = [] }) {
+  const servicesList = services.map((item) => `${item.name}: ${money(item.base_price)} · ${item.duration_minutes} min · categoría ${item.category}`).join('\n');
+  const specialistList = specialists.map((sp) => `${sp.full_name}: ${(sp.categories || []).join(', ') || 'sin especialidades'}`).join('\n');
+  const schemaHint = 'Devuelve solo JSON válido con: difficulty string (Baja, Media, Alta o Especial), estimatedMinutes number, price number en soles peruanos, category string, recommendedSpecialist string, materials array de strings, explanation string breve y formal, requiresReview boolean.';
+  const prompt = `Actúa como cotizadora experta de un salón de belleza en Perú. Analiza la imagen y/o descripción, estima un precio realista en soles y clasifica el pedido. Si el pedido no coincide exactamente con el catálogo, usa la categoría Otros, salvo que claramente sea Uñas, Maquillaje o Peinados. Recomienda una trabajadora SOLO si su especialidad coincide con la categoría; por ejemplo, rulos/ondas corresponden a Peinados, no a Uñas. Indica que el precio es aproximado y que debe confirmarse generando una reserva.\n\nServicios disponibles:\n${servicesList || 'Sin servicios cargados'}\n\nTrabajadoras y especialidades:\n${specialistList || 'Sin trabajadoras cargadas'}\n\nDescripción: ${hints || 'Sin descripción adicional'}`;
   try {
     const text = await generateGeminiContent({ prompt, image, schemaHint });
     const parsed = extractJson(text);
-    if (!parsed) return fallbackQuote(hints);
+    if (!parsed) return fallbackQuote(hints, specialists);
     return {
       difficulty: parsed.difficulty || 'Media',
       estimatedMinutes: Number(parsed.estimatedMinutes) || 95,
       price: Number(parsed.price) || 95,
+      category: parsed.category || pickQuoteCategory(hints) || 'Otros',
+      recommendedSpecialist: parsed.recommendedSpecialist || pickSpecialistForCategory(parsed.category || pickQuoteCategory(hints), specialists) || 'por confirmar',
       materials: Array.isArray(parsed.materials) ? parsed.materials.slice(0, 8) : ['Nail Art'],
-      explanation: parsed.explanation || 'Cotización generada con IA.',
+      explanation: parsed.explanation || 'El precio es aproximado; para asegurarlo, genera una reserva y confirma el precio final con la trabajadora asignada.',
       requiresReview: Boolean(parsed.requiresReview),
       source: 'gemini',
     };
   } catch (error) {
-    return { ...fallbackQuote(hints), aiWarning: error.code === 'GEMINI_NOT_CONFIGURED' ? 'Configura GEMINI_API_KEY para activar Gemini.' : `Gemini no respondió${error.status ? ` (HTTP ${error.status})` : ''}; se usó cotización local.` };
+    return { ...fallbackQuote(hints, specialists), aiWarning: error.code === 'GEMINI_NOT_CONFIGURED' ? 'Configura GEMINI_API_KEY para activar Gemini.' : `Gemini no respondió${error.status ? ` (HTTP ${error.status})` : ''}; se usó cotización local.` };
   }
 }
 
