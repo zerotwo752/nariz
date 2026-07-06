@@ -41,6 +41,16 @@ npm --workspace backend run dev
 
 La carpeta `backend/database` contiene las tablas y datos iniciales para login, roles, productos, servicios, reservas y pagos.
 
+El backend ahora crea/actualiza las tablas automáticamente al iniciar (`npm run backend:dev` o `npm start`). Solo asegúrate de que `DATABASE_URL` apunte a tu base de datos Neon correcta. Si quieres ejecutar la inicialización manualmente, usa:
+
+```bash
+npm --workspace backend run db:init
+```
+
+Si necesitas iniciar el backend sin tocar la base de datos, define `SKIP_DB_INIT=true`.
+
+También puedes ejecutar los SQL directamente con `psql`:
+
 ```bash
 psql "$DATABASE_URL" -f backend/database/schema.sql
 psql "$DATABASE_URL" -f backend/database/seed.sql

@@ -4,10 +4,13 @@ insert into users (dni, full_name, birth_date, phone, email, password_hash, role
   ('00000003', 'Andrea Cliente', '1995-05-31', '+51900000003', 'andrea@nailbeauty.test', '113f91ab98609ec4e95079bbee8aeb59:3e6a81906c744d5dda9e14c795b0b59daca6efe38025d6c35c2948edd4dc19d3454aa9f2930eb38cc452fa8b79ccacce0460e9f1a5f62fe544aedf965f2401c6', 'USER', 250)
 on conflict (dni) do nothing;
 
-insert into specialists (full_name, phone, email, bio) values
+insert into specialists (full_name, phone, email, bio)
+select full_name, phone, email, bio
+from (values
   ('Valeria Torres', '+51911111111', 'valeria@nailbeauty.test', 'Especialista en manicure gel y pedicure spa.'),
   ('Daniela Ruiz', '+51922222222', 'daniela@nailbeauty.test', 'Especialista en acrílicas y nail art.')
-on conflict do nothing;
+) as seed(full_name, phone, email, bio)
+where not exists (select 1 from specialists where specialists.email = seed.email);
 
 insert into services (id, name, description, base_price, duration_minutes, category, image_url) values
   ('basic', 'Manicure básica', 'Limpieza, limado, cutícula e hidratación.', 40, 45, 'manicure', null),
