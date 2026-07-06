@@ -10,7 +10,13 @@ Instala dependencias desde la raíz del proyecto:
 npm install
 ```
 
-Copia `backend/env.example` a `backend/.env` y configura tus credenciales de PostgreSQL/JWT.
+Copia `backend/env.example` a `backend/.env` y configura tus credenciales de PostgreSQL/JWT. El backend también lee un `.env` en la raíz del proyecto, pero `backend/.env` tiene prioridad.
+
+Para Neon, en `DATABASE_URL` pega solo la URL que empieza por `postgresql://`; no incluyas el comando `psql` ni las comillas que muestra el panel. Ejemplo:
+
+```env
+DATABASE_URL=postgresql://neondb_owner:TU_PASSWORD@ep-tu-host-pooler.region.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+```
 
 Frontend:
 
