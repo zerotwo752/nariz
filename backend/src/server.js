@@ -1,10 +1,10 @@
+require('./env');
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const { pool } = require('./db');
-require('dotenv').config();
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 6 * 1024 * 1024 } });
