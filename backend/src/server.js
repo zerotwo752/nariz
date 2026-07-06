@@ -115,14 +115,21 @@ app.post('/api/assistant', async (req, res) => {
   if (!message) return res.status(400).json({ error: 'Escribe una pregunta para la asistente IA' });
 
   let services = [];
+  let products = [];
   try {
-    const result = await pool.query('select name, base_price, duration_minutes from services where is_active=true order by name');
+    const result = await pool.query('select name, description, base_price, duration_minutes, category from services where is_active=true order by name');
     services = result.rows;
   } catch {
     services = [];
   }
+  try {
+    const result = await pool.query('select sku, name, description, category, price, stock from products where is_active=true order by name');
+    products = result.rows;
+  } catch {
+    products = [];
+  }
 
-  res.json(await assistantReply({ message, services }));
+  res.json(await assistantReply({ message, services, products }));
 });
 
 app.get('/api/bookings', auth, async (req, res) => {
