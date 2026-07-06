@@ -1,5 +1,6 @@
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta';
-const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest';
+const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const MAX_CONTEXT_ITEMS = 30;
 
 function normalizeGeminiApiKey(value) {
   return String(value || '')
@@ -59,6 +60,72 @@ async function generateGeminiContent({ prompt, image, schemaHint }) {
   return data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('\n').trim() || '';
 }
 
+function money(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `S/ ${number.toFixed(number % 1 ? 2 : 0)}` : 'precio por confirmar';
+}
+
+function formatCatalogItem(item) {
+  const price = money(item.base_price ?? item.price);
+  const duration = item.duration_minutes || item.duration;
+  const stock = item.stock === undefined ? '' : `, stock: ${item.stock}`;
+  return `${item.name}: ${price}${duration ? `, ${duration} min` : ''}${stock}${item.description ? ` - ${item.description}` : ''}`;
+}
+
+function buildCatalogContext({ services = [], products = [] }) {
+  const activeProducts = products.filter((product) => Number(product.stock ?? 1) > 0);
+  return {
+    services: services.slice(0, MAX_CONTEXT_ITEMS),
+    products: activeProducts.slice(0, MAX_CONTEXT_ITEMS),
+    hasMoreServices: services.length > MAX_CONTEXT_ITEMS,
+    hasMoreProducts: activeProducts.length > MAX_CONTEXT_ITEMS,
+  };
+}
+
+function tokenize(text) {
+  return String(text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length >= 3);
+}
+
+function filterCatalogByMessage(items, message) {
+  const tokens = tokenize(message);
+  if (!tokens.length) return [];
+  return items.filter((item) => {
+    const haystack = tokenize(`${item.name} ${item.description || ''} ${item.category || ''} ${item.sku || ''}`);
+    return tokens.some((token) => haystack.includes(token));
+  });
+}
+
+function localAssistantReply({ message, services = [], products = [] }) {
+  const text = String(message || '').toLowerCase();
+  const wantsCatalog = /producto|productos|vende|venden|tiene|tienen|precio|precios|catalogo|catálogo|servicio|servicios|rojo|nude|gel|acrilic|uñas|unas/.test(text);
+  const productMatches = filterCatalogByMessage(products, message);
+  const serviceMatches = filterCatalogByMessage(services, message);
+  const availableProducts = products.filter((product) => Number(product.stock ?? 1) > 0);
+  const items = [...productMatches, ...serviceMatches];
+
+  if (items.length) {
+    return `Sí, de momento encontré estas opciones para ti:\n${items.slice(0, 6).map((item) => `• ${formatCatalogItem(item)}`).join('\n')}\n¿Te gustaría que te ayude a reservar o buscas algún color/ocasión en específico?`;
+  }
+
+  if (wantsCatalog) {
+    if (availableProducts.length === 1 && services.length === 0) {
+      return `De momento tenemos este producto disponible: ${formatCatalogItem(availableProducts[0])}. ¿Te gustaría llevarlo o quieres que te ayude con una reserva?`;
+    }
+    if (availableProducts.length <= 6 && services.length <= 6) {
+      const catalog = [...availableProducts, ...services];
+      if (catalog.length) return `De momento tenemos estas opciones:\n${catalog.map((item) => `• ${formatCatalogItem(item)}`).join('\n')}\n¿Te gustaría alguna?`;
+    }
+    return 'Tenemos varias opciones disponibles. Para recomendarte mejor, ¿buscas algún color específico, tipo de uña (acrílica, gel, press-on) o es para algún evento especial?';
+  }
+
+  return 'Claro, puedo ayudarte con productos, precios, diseños y reservas. Cuéntame qué color, estilo u ocasión tienes en mente y reviso las opciones disponibles.';
+}
+
 function fallbackQuote(hints = '') {
   const lower = String(hints).toLowerCase();
   const high = /piedra|3d|boda|relieve|espejo|cristal|encapsulado|chrome/.test(lower);
@@ -94,15 +161,29 @@ async function quoteDesign({ hints, image }) {
   }
 }
 
-async function assistantReply({ message, services = [] }) {
-  const serviceList = services.map((s) => `${s.name}: S/ ${s.base_price || s.price}, ${s.duration_minutes || s.duration} min`).join('; ');
-  const prompt = `Eres una asesora de belleza y ventas para un salón de uñas en Perú. Responde en español, tono cálido y breve, recomienda servicios adicionales solo si aportan valor. Servicios disponibles: ${serviceList || 'manicure, gel, acrílicas, soft gel y nail art'}. Pregunta: ${message}`;
+async function assistantReply({ message, services = [], products = [] }) {
+  const catalog = buildCatalogContext({ services, products });
+  const serviceList = catalog.services.map(formatCatalogItem).join('\n');
+  const productList = catalog.products.map(formatCatalogItem).join('\n');
+  const prompt = `Eres una asesora de belleza y ventas para un salón de uñas en Perú. Responde en español, tono cálido y breve.
+Usa SOLO los servicios y productos disponibles abajo; no inventes productos, precios, colores ni servicios.
+Si hay 1 o pocos resultados relevantes, menciónalos con precio y pregunta si le gustaría reservar o comprar.
+Si hay muchos productos o la pregunta es amplia, no listes todo: pregunta por color, tipo de uña u ocasión.
+Si no hay coincidencias, dilo con amabilidad y ofrece buscar por color, evento o tipo.
+
+Servicios disponibles:\n${serviceList || 'Sin servicios cargados'}
+${catalog.hasMoreServices ? '\nHay más servicios no listados en este contexto.' : ''}
+
+Productos disponibles con stock:\n${productList || 'Sin productos cargados'}
+${catalog.hasMoreProducts ? '\nHay más productos no listados en este contexto.' : ''}
+
+Pregunta del cliente: ${message}`;
   try {
     const text = await generateGeminiContent({ prompt });
-    return { reply: text || 'Claro, cuéntame qué estilo buscas y te recomiendo una opción.', source: 'gemini' };
+    return { reply: text || localAssistantReply({ message, services, products }), source: 'gemini' };
   } catch (error) {
-    return { reply: 'Puedo ayudarte con precios, diseños y reservas. Para una ocasión especial recomiendo Soft Gel nude con brillo perlado y Nail Art sutil.', source: 'fallback', aiWarning: error.code === 'GEMINI_NOT_CONFIGURED' ? 'Configura GEMINI_API_KEY para activar Gemini.' : `Gemini no respondió${error.status ? ` (HTTP ${error.status})` : ''}; se usó respuesta local.` };
+    return { reply: localAssistantReply({ message, services, products }), source: 'fallback', aiWarning: error.code === 'GEMINI_NOT_CONFIGURED' ? 'Configura GEMINI_API_KEY para activar Gemini.' : `Gemini no respondió${error.status ? ` (HTTP ${error.status})` : ''}; se usó respuesta local.` };
   }
 }
 
-module.exports = { quoteDesign, assistantReply, generateGeminiContent, extractJson, normalizeGeminiApiKey };
+module.exports = { quoteDesign, assistantReply, generateGeminiContent, extractJson, normalizeGeminiApiKey, localAssistantReply };
