@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const { pool } = require('./db');
+const { ensureDatabase } = require('./initDb');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 6 * 1024 * 1024 } });
@@ -119,5 +120,19 @@ app.get('/api/admin/reports', auth, requireRole('SA', 'OWNER'), (_, res) => {
   res.json({ todayBookings: 18, monthlyRevenue: 12450, topService: 'Gel permanente', aiInsight: 'La demanda sube viernes y sábado; lanzar promoción de Soft Gel los martes puede equilibrar la agenda.' });
 });
 
-app.listen(PORT, () => console.log(`Nail Beauty API running on ${PORT}`));
+async function start() {
+  if (process.env.SKIP_DB_INIT !== 'true') {
+    await ensureDatabase();
+  }
+
+  app.listen(PORT, () => console.log(`Nail Beauty API running on ${PORT}`));
+}
+
+if (require.main === module) {
+  start().catch((error) => {
+    console.error('No se pudo iniciar Nail Beauty API:', error.message);
+    process.exit(1);
+  });
+}
+
 module.exports = app;
