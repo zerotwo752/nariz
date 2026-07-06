@@ -1,5 +1,18 @@
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta';
-const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest';
+
+function normalizeGeminiApiKey(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^['"]|['"]$/g, '')
+    .replace(/^Bearer\s+/i, '');
+}
+
+function getGeminiApiKey() {
+  const key = normalizeGeminiApiKey(process.env.GEMINI_API_KEY);
+  if (key) process.env.GEMINI_API_KEY = key;
+  return key;
+}
 
 function extractJson(text) {
   const raw = String(text || '').trim();
@@ -11,8 +24,17 @@ function extractJson(text) {
   try { return JSON.parse(candidate.slice(start, end + 1)); } catch { return null; }
 }
 
+function buildGeminiError(data, status) {
+  const message = data.error?.message || 'Gemini no pudo generar respuesta';
+  const error = new Error(message);
+  error.code = 'GEMINI_REQUEST_FAILED';
+  error.status = status;
+  return error;
+}
+
 async function generateGeminiContent({ prompt, image, schemaHint }) {
-  if (!process.env.GEMINI_API_KEY) {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) {
     const error = new Error('GEMINI_API_KEY no configurada');
     error.code = 'GEMINI_NOT_CONFIGURED';
     throw error;
@@ -23,9 +45,9 @@ async function generateGeminiContent({ prompt, image, schemaHint }) {
     parts.push({ inlineData: { mimeType: image.mimetype, data: image.buffer.toString('base64') } });
   }
 
-  const response = await fetch(`${GEMINI_API_URL}/models/${DEFAULT_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+  const response = await fetch(`${GEMINI_API_URL}/models/${DEFAULT_MODEL}:generateContent`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-goog-api-key': apiKey },
     body: JSON.stringify({
       contents: [{ role: 'user', parts }],
       generationConfig: { temperature: 0.35, responseMimeType: schemaHint ? 'application/json' : 'text/plain' },
@@ -33,11 +55,7 @@ async function generateGeminiContent({ prompt, image, schemaHint }) {
   });
 
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(data.error?.message || 'Gemini no pudo generar respuesta');
-    error.code = 'GEMINI_REQUEST_FAILED';
-    throw error;
-  }
+  if (!response.ok) throw buildGeminiError(data, response.status);
   return data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('\n').trim() || '';
 }
 
@@ -72,7 +90,7 @@ async function quoteDesign({ hints, image }) {
       source: 'gemini',
     };
   } catch (error) {
-    return { ...fallbackQuote(hints), aiWarning: error.code === 'GEMINI_NOT_CONFIGURED' ? 'Configura GEMINI_API_KEY para activar Gemini.' : 'Gemini no respondió; se usó cotización local.' };
+    return { ...fallbackQuote(hints), aiWarning: error.code === 'GEMINI_NOT_CONFIGURED' ? 'Configura GEMINI_API_KEY para activar Gemini.' : `Gemini no respondió${error.status ? ` (HTTP ${error.status})` : ''}; se usó cotización local.` };
   }
 }
 
@@ -83,8 +101,8 @@ async function assistantReply({ message, services = [] }) {
     const text = await generateGeminiContent({ prompt });
     return { reply: text || 'Claro, cuéntame qué estilo buscas y te recomiendo una opción.', source: 'gemini' };
   } catch (error) {
-    return { reply: 'Puedo ayudarte con precios, diseños y reservas. Para una ocasión especial recomiendo Soft Gel nude con brillo perlado y Nail Art sutil.', source: 'fallback', aiWarning: error.code === 'GEMINI_NOT_CONFIGURED' ? 'Configura GEMINI_API_KEY para activar Gemini.' : 'Gemini no respondió; se usó respuesta local.' };
+    return { reply: 'Puedo ayudarte con precios, diseños y reservas. Para una ocasión especial recomiendo Soft Gel nude con brillo perlado y Nail Art sutil.', source: 'fallback', aiWarning: error.code === 'GEMINI_NOT_CONFIGURED' ? 'Configura GEMINI_API_KEY para activar Gemini.' : `Gemini no respondió${error.status ? ` (HTTP ${error.status})` : ''}; se usó respuesta local.` };
   }
 }
 
-module.exports = { quoteDesign, assistantReply };
+module.exports = { quoteDesign, assistantReply, generateGeminiContent, extractJson, normalizeGeminiApiKey };
