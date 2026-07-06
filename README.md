@@ -1,37 +1,49 @@
-# Nail Beauty - Plataforma inteligente de reservas
+# Nail Beauty Platform
 
-Aplicación SaaS-ready para salones de manicure y nail art. Incluye frontend responsive para Vercel, backend Node/Express para Render y esquema PostgreSQL compatible con Neon.
+Aplicación para salón de belleza con frontend en Vite/React y backend en Express/PostgreSQL.
 
-## Estructura
+## Ejecutar frontend y backend por separado
 
-- `frontend/`: landing/dashboard responsive inspirado en la plantilla de referencia.
-- `backend/`: API REST para autenticación, servicios, reservas, cotización IA preliminar y reportes.
-- `backend/src/schema.sql`: tablas iniciales para Neon PostgreSQL.
-- `vercel.json`: despliegue del frontend.
-- `render.yaml`: despliegue del backend en Render.
-
-## Variables de entorno
-
-Backend:
+Instala dependencias desde la raíz del proyecto:
 
 ```bash
-DATABASE_URL=postgresql://...
-JWT_SECRET=change-me
-CORS_ORIGIN=https://tu-frontend.vercel.app
-PORT=4000
+npm install
 ```
+
+Copia `backend/env.example` a `backend/.env` y configura tus credenciales de PostgreSQL/JWT.
 
 Frontend:
 
 ```bash
-VITE_API_URL=https://tu-backend.onrender.com
+npm run frontend:dev
 ```
 
-## Comandos
+Backend:
 
 ```bash
-npm install
-npm --workspace frontend run dev
-npm --workspace frontend run build
-npm --workspace backend start
+npm run backend:dev
 ```
+
+También puedes ejecutar los workspaces directamente:
+
+```bash
+npm --workspace frontend run dev
+npm --workspace backend run dev
+```
+
+## Base de datos
+
+La carpeta `backend/database` contiene las tablas y datos iniciales para login, roles, productos, servicios, reservas y pagos.
+
+```bash
+psql "$DATABASE_URL" -f backend/database/schema.sql
+psql "$DATABASE_URL" -f backend/database/seed.sql
+```
+
+Roles iniciales:
+
+- `SA`: súper admin.
+- `OWNER`: dueño del salón.
+- `USER`: cliente/usuario final.
+
+> Usuarios demo: `00000001` / `Admin123!`, `00000002` / `Duena123!`, `00000003` / `Andrea123!`.
