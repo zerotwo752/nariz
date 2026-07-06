@@ -161,21 +161,28 @@ async function quoteDesign({ hints, image }) {
   }
 }
 
-async function assistantReply({ message, services = [], products = [] }) {
+async function assistantReply({ message, services = [], products = [], specialists = [], availability = [] }) {
   const catalog = buildCatalogContext({ services, products });
   const serviceList = catalog.services.map(formatCatalogItem).join('\n');
   const productList = catalog.products.map(formatCatalogItem).join('\n');
+  const specialistList = specialists.map((sp) => `${sp.full_name}: atiende de ${String(sp.work_start).slice(0,5)} a ${String(sp.work_end).slice(0,5)}; especialidades: ${sp.specialties || 'por confirmar'}`).join('\n');
+  const bookingList = availability.map((b) => `${b.specialist_name}: ${b.service_name} el ${new Date(b.starts_at).toLocaleString('es-PE', { timeZone: 'America/Lima' })}, bloquea ${Number(b.duration_minutes) + Number(b.buffer_minutes || 15)} min, estado ${b.status}`).join('\n');
   const prompt = `Eres una asesora de belleza y ventas para un salón de uñas en Perú. Responde en español, tono cálido y breve.
 Usa SOLO los servicios y productos disponibles abajo; no inventes productos, precios, colores ni servicios.
 Si hay 1 o pocos resultados relevantes, menciónalos con precio y pregunta si le gustaría reservar o comprar.
 Si hay muchos productos o la pregunta es amplia, no listes todo: pregunta por color, tipo de uña u ocasión.
 Si no hay coincidencias, dilo con amabilidad y ofrece buscar por color, evento o tipo.
+Si preguntan por horarios, reservas o trabajadoras, usa los horarios laborales, especialidades y reservas ocupadas; explica que la reserva se confirma desde la página.
 
 Servicios disponibles:\n${serviceList || 'Sin servicios cargados'}
 ${catalog.hasMoreServices ? '\nHay más servicios no listados en este contexto.' : ''}
 
 Productos disponibles con stock:\n${productList || 'Sin productos cargados'}
 ${catalog.hasMoreProducts ? '\nHay más productos no listados en este contexto.' : ''}
+
+Trabajadoras activas:\n${specialistList || 'Sin trabajadoras cargadas'}
+
+Reservas ocupadas próximas:\n${bookingList || 'Sin reservas próximas registradas'}
 
 Pregunta del cliente: ${message}`;
   try {
