@@ -110,11 +110,19 @@ app.post('/api/quotes/ai', auth, upload.single('image'), async (req, res) => {
   res.json({ id: result.rows[0].id, ...payload });
 });
 
-app.post('/api/assistant', auth, async (req, res) => {
+app.post('/api/assistant', async (req, res) => {
   const message = String(req.body.message || '').trim();
   if (!message) return res.status(400).json({ error: 'Escribe una pregunta para la asistente IA' });
-  const services = await pool.query('select name, base_price, duration_minutes from services where is_active=true order by name');
-  res.json(await assistantReply({ message, services: services.rows }));
+
+  let services = [];
+  try {
+    const result = await pool.query('select name, base_price, duration_minutes from services where is_active=true order by name');
+    services = result.rows;
+  } catch {
+    services = [];
+  }
+
+  res.json(await assistantReply({ message, services }));
 });
 
 app.get('/api/bookings', auth, async (req, res) => {
