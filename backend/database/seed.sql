@@ -1,7 +1,8 @@
 insert into categories (name, description) values
   ('Uñas', 'Manicure, acrílicas, soft gel y nail art.'),
   ('Maquillaje', 'Maquillaje social, novias y eventos.'),
-  ('Peinados', 'Ondas, laceados, recogidos y peinados para eventos.')
+  ('Peinados', 'Ondas, laceados, recogidos y peinados para eventos.'),
+  ('Otros', 'Pedidos personalizados para cotizar con IA cuando no están en el catálogo.')
 on conflict (name) do update set description=excluded.description;
 
 insert into users (dni, full_name, birth_date, phone, email, password_hash, plain_password, role_code, loyalty_points) values
