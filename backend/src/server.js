@@ -75,12 +75,11 @@ app.get('/api/payment-methods', async (_, res) => {
 app.get('/api/specialists', async (req, res) => {
   const { serviceId, categoryId } = req.query;
   const result = await pool.query(`select sp.id, sp.full_name, sp.phone, sp.email, sp.bio, sp.work_start, sp.work_end,
-      coalesce(json_agg(json_build_object('id', c.id, 'name', c.name)) filter (where c.id is not null), '[]') as categories
+      coalesce(json_agg(distinct jsonb_build_object('id', c.id, 'name', c.name)) filter (where c.id is not null), '[]') as categories
     from specialists sp
     left join specialist_categories sc on sc.specialist_id=sp.id
     left join categories c on c.id=sc.category_id
-    left join services sv on sv.category_id=c.id
-    where sp.is_active=true and ($1::varchar is null or sv.id=$1) and ($2::bigint is null or c.id=$2)
+    where sp.is_active=true and ($1::varchar is null or exists (select 1 from services svc where svc.id=$1 and svc.category_id=c.id)) and ($2::bigint is null or c.id=$2)
     group by sp.id order by sp.full_name`, [serviceId || null, categoryId || null]);
   res.json(result.rows);
 });
@@ -88,7 +87,7 @@ app.get('/api/specialists', async (req, res) => {
 
 app.get('/api/admin/workers', auth, requireRole('SA', 'OWNER'), async (_, res) => {
   const result = await pool.query(`select sp.*, u.dni, u.plain_password, u.is_active as user_active,
-      coalesce(json_agg(json_build_object('id', c.id, 'name', c.name)) filter (where c.id is not null), '[]') as categories
+      coalesce(json_agg(distinct jsonb_build_object('id', c.id, 'name', c.name)) filter (where c.id is not null), '[]') as categories
     from specialists sp join users u on u.id=sp.user_id
     left join specialist_categories sc on sc.specialist_id=sp.id left join categories c on c.id=sc.category_id
     group by sp.id, u.dni, u.plain_password, u.is_active order by sp.full_name`);
@@ -123,6 +122,23 @@ app.post('/api/admin/categories', auth, requireRole('SA', 'OWNER'), async (req, 
   res.status(201).json(result.rows[0]);
 });
 
+app.patch('/api/admin/categories/:id', auth, requireRole('SA', 'OWNER'), async (req, res) => {
+  const { name, description } = req.body;
+  if (!name) return res.status(400).json({ error: 'Nombre de categoría obligatorio' });
+  const result = await pool.query('update categories set name=$1, description=$2, is_active=true where id=$3 returning *', [name, description || null, req.params.id]);
+  if (!result.rowCount) return res.status(404).json({ error: 'Categoría no encontrada' });
+  await pool.query('update services set category=$1 where category_id=$2', [result.rows[0].name, req.params.id]);
+  res.json(result.rows[0]);
+});
+
+app.delete('/api/admin/categories/:id', auth, requireRole('SA', 'OWNER'), async (req, res) => {
+  const linked = await pool.query('select count(*)::int as count from services where category_id=$1 and is_active=true', [req.params.id]);
+  if (linked.rows[0].count > 0) return res.status(409).json({ error: 'Primero elimina o mueve los servicios de esta categoría' });
+  const result = await pool.query('update categories set is_active=false where id=$1 returning *', [req.params.id]);
+  if (!result.rowCount) return res.status(404).json({ error: 'Categoría no encontrada' });
+  res.json({ ok: true });
+});
+
 app.post('/api/admin/services', auth, requireRole('SA', 'OWNER'), upload.single('image'), async (req, res) => {
   const { name, description, price, duration, categoryId } = req.body;
   if (!name || !description || !price || !duration || !categoryId) return res.status(400).json({ error: 'Completa título, descripción, precio, duración y categoría' });
@@ -134,12 +150,31 @@ app.post('/api/admin/services', auth, requireRole('SA', 'OWNER'), upload.single(
   res.status(201).json(result.rows[0]);
 });
 
+app.patch('/api/admin/services/:id', auth, requireRole('SA', 'OWNER'), upload.single('image'), async (req, res) => {
+  const { name, description, price, duration, categoryId } = req.body;
+  const current = await pool.query('select * from services where id=$1', [req.params.id]);
+  if (!current.rowCount) return res.status(404).json({ error: 'Servicio no encontrado' });
+  const cat = categoryId ? await pool.query('select * from categories where id=$1 and is_active=true', [categoryId]) : { rows: [] };
+  if (categoryId && !cat.rows.length) return res.status(404).json({ error: 'Categoría no encontrada' });
+  const imageUrl = req.file ? `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}` : null;
+  const result = await pool.query(`update services set name=coalesce($1,name), description=coalesce($2,description), base_price=coalesce($3,base_price), duration_minutes=coalesce($4,duration_minutes), category=coalesce($5,category), category_id=coalesce($6,category_id), image_url=coalesce($7,image_url), is_active=true where id=$8 returning *`, [name || null, description || null, price || null, duration || null, cat.rows[0]?.name || null, categoryId || null, imageUrl, req.params.id]);
+  res.json(result.rows[0]);
+});
+
+app.delete('/api/admin/services/:id', auth, requireRole('SA', 'OWNER'), async (req, res) => {
+  const result = await pool.query('update services set is_active=false where id=$1 returning *', [req.params.id]);
+  if (!result.rowCount) return res.status(404).json({ error: 'Servicio no encontrado' });
+  res.json({ ok: true });
+});
+
 app.get('/api/admin/revenue', auth, requireRole('SA', 'OWNER'), async (_, res) => {
   const result = await pool.query(`select sp.id, sp.full_name, coalesce(sum(case when b.status='paid' then b.price else 0 end),0) as total,
       coalesce(sum(case when b.status='paid' and b.paid_at::date=current_date then b.price else 0 end),0) as today,
-      coalesce(json_agg(json_build_object('service', sv.name, 'starts_at', b.starts_at, 'price', b.price, 'payment', pm.name, 'status', b.status)) filter (where b.id is not null), '[]') as jobs
+      count(b.id) filter (where b.starts_at::date=current_date and b.status <> 'cancelled') as today_jobs,
+      coalesce(json_agg(json_build_object('id', b.id, 'service', sv.name, 'starts_at', b.starts_at, 'price', b.price, 'payment', pm.name, 'status', b.status)) filter (where b.id is not null), '[]') as jobs
     from specialists sp left join bookings b on b.specialist_id=sp.id left join services sv on sv.id=b.service_id left join payment_methods pm on pm.id=b.payment_method_id
-    group by sp.id order by total desc`);
+    where sp.is_active=true
+    group by sp.id order by sp.full_name`);
   res.json(result.rows);
 });
 
@@ -227,7 +262,7 @@ app.post('/api/assistant', async (req, res) => {
 });
 
 app.get('/api/bookings', auth, async (req, res) => {
-  const isAdmin = ['SA', 'OWNER'].includes(req.user.role);
+  const isAdmin = req.user.role === 'SA';
   const isWorker = req.user.role === 'WORKER';
   const result = await pool.query(
     `select b.*, s.name as service_name, sp.full_name as specialist_name, u.full_name as customer_name, pm.name as payment_method
@@ -292,7 +327,7 @@ app.post('/api/bookings', auth, async (req, res) => {
 app.patch('/api/bookings/:id/status', auth, async (req, res) => {
   const allowed = ['pending', 'in_progress', 'paid', 'cancelled', 'no_show'];
   if (!allowed.includes(req.body.status)) return res.status(400).json({ error: 'Estado inválido' });
-  const isAdmin = ['SA', 'OWNER'].includes(req.user.role);
+  const isAdmin = req.user.role === 'SA';
   const result = await pool.query(
     `update bookings set status=$1, paid_at=case when $1='paid' then now() else paid_at end where id=$2 and ($3::boolean or user_id=$4 or specialist_id in (select id from specialists where user_id=$4)) returning *`,
     [req.body.status, req.params.id, isAdmin, req.user.id]
