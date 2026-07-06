@@ -14,14 +14,6 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',') || '*' }));
 app.use(express.json({ limit: '2mb' }));
 
-const services = [
-  { id: 'basic', name: 'Manicure básica', price: 40, duration: 45, description: 'Limpieza, limado, cutícula e hidratación.' },
-  { id: 'spa', name: 'Manicure spa', price: 65, duration: 70, description: 'Experiencia relajante con exfoliación y masaje.' },
-  { id: 'gel', name: 'Gel permanente', price: 60, duration: 75, description: 'Color de larga duración y brillo premium.' },
-  { id: 'acrylic', name: 'Acrílicas', price: 80, duration: 110, description: 'Extensión resistente con acabado personalizado.' },
-  { id: 'softgel', name: 'Soft Gel', price: 60, duration: 90, description: 'Extensiones ligeras, flexibles y modernas.' },
-  { id: 'nailart', name: 'Nail Art', price: 30, duration: 50, description: 'Decoración artística, relieves, piedras y efectos.' },
-];
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -37,7 +29,14 @@ function verifyPassword(password, stored) {
 }
 
 function sign(user) {
-  return jwt.sign({ id: user.id, dni: user.dni, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign({ id: user.id, dni: user.dni, role: user.role_code }, JWT_SECRET, { expiresIn: '7d' });
+}
+
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) return res.status(403).json({ error: 'No tienes permisos para esta acción' });
+    next();
+  };
 }
 
 function auth(req, res, next) {
@@ -47,16 +46,24 @@ function auth(req, res, next) {
 }
 
 app.get('/health', (_, res) => res.json({ ok: true, service: 'Nail Beauty API' }));
-app.get('/api/services', (_, res) => res.json(services));
+app.get('/api/services', async (_, res) => {
+  const result = await pool.query('select id, name, description, base_price as price, duration_minutes as duration, category, image_url from services where is_active=true order by name');
+  res.json(result.rows);
+});
+
+app.get('/api/payment-methods', async (_, res) => {
+  const result = await pool.query('select id, code, name, provider, requires_reference from payment_methods where is_active=true order by id');
+  res.json(result.rows);
+});
 
 app.post('/api/auth/register', async (req, res) => {
   const { dni, fullName, birthDate, phone, email, password } = req.body;
   if (!dni || !fullName || !birthDate || !phone || !password) return res.status(400).json({ error: 'Faltan campos obligatorios' });
   const passwordHash = hashPassword(password);
   const result = await pool.query(
-    `insert into clients (dni, full_name, birth_date, phone, email, password_hash)
-     values ($1,$2,$3,$4,$5,$6)
-     returning id, dni, full_name, phone, email, loyalty_points, role`,
+    `insert into users (dni, full_name, birth_date, phone, email, password_hash, role_code)
+     values ($1,$2,$3,$4,$5,$6,'USER')
+     returning id, dni, full_name, phone, email, loyalty_points, role_code`,
     [dni, fullName, birthDate, phone, email || null, passwordHash]
   );
   res.status(201).json({ user: result.rows[0], token: sign(result.rows[0]) });
@@ -64,37 +71,51 @@ app.post('/api/auth/register', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
   const { dni, password } = req.body;
-  const result = await pool.query('select * from clients where dni=$1', [dni]);
+  const result = await pool.query('select * from users where dni=$1 and is_active=true', [dni]);
   const user = result.rows[0];
   if (!user || !verifyPassword(password, user.password_hash)) return res.status(401).json({ error: 'Credenciales inválidas' });
-  res.json({ token: sign(user), user: { id: user.id, dni: user.dni, full_name: user.full_name, role: user.role, loyalty_points: user.loyalty_points } });
+  res.json({ token: sign(user), user: { id: user.id, dni: user.dni, full_name: user.full_name, role: user.role_code, loyalty_points: user.loyalty_points } });
 });
 
 app.get('/api/me', auth, async (req, res) => {
-  const result = await pool.query('select id,dni,full_name,birth_date,phone,email,loyalty_points,role from clients where id=$1', [req.user.id]);
+  const result = await pool.query('select id,dni,full_name,birth_date,phone,email,loyalty_points,role_code from users where id=$1', [req.user.id]);
   res.json(result.rows[0]);
 });
 
-app.post('/api/quotes/ai', upload.single('image'), (req, res) => {
+app.post('/api/quotes/ai', auth, upload.single('image'), async (req, res) => {
   const hints = String(req.body.hints || '').toLowerCase();
   const complexity = hints.includes('piedra') || hints.includes('3d') || hints.includes('boda') ? 'Alta' : 'Media';
   const base = complexity === 'Alta' ? 150 : 95;
-  res.json({ difficulty: complexity, estimatedMinutes: complexity === 'Alta' ? 135 : 95, price: base, materials: ['Acrílico', 'Nail Art', 'Esmalte permanente', complexity === 'Alta' ? 'Piedras' : 'Brillo'], explanation: 'Cotización preliminar generada por reglas IA; diseños fuera de lo habitual pasan a revisión del salón.', requiresReview: complexity === 'Alta' });
+  const payload = {
+    difficulty: complexity,
+    estimatedMinutes: complexity === 'Alta' ? 135 : 95,
+    price: base,
+    materials: ['Acrílico', 'Nail Art', 'Esmalte permanente', complexity === 'Alta' ? 'Piedras' : 'Brillo'],
+    explanation: 'Cotización preliminar generada por reglas IA; diseños fuera de lo habitual pasan a revisión del salón.',
+    requiresReview: complexity === 'Alta',
+  };
+  const result = await pool.query(
+    'insert into ai_quotes (user_id, hints, difficulty, estimated_minutes, price, materials, requires_review) values ($1,$2,$3,$4,$5,$6,$7) returning id',
+    [req.user.id, req.body.hints || null, payload.difficulty, payload.estimatedMinutes, payload.price, JSON.stringify(payload.materials), payload.requiresReview]
+  );
+  res.json({ id: result.rows[0].id, ...payload });
 });
 
 app.post('/api/bookings', auth, async (req, res) => {
-  const { serviceId, specialistId, startsAt, paymentMethod, depositAmount, quote } = req.body;
-  const service = services.find((item) => item.id === serviceId);
-  if (!service || !startsAt) return res.status(400).json({ error: 'Servicio y horario son obligatorios' });
+  const { serviceId, specialistId, startsAt, quoteId, notes } = req.body;
+  if (!serviceId || !startsAt) return res.status(400).json({ error: 'Servicio y horario son obligatorios' });
+  const serviceResult = await pool.query('select * from services where id=$1 and is_active=true', [serviceId]);
+  const service = serviceResult.rows[0];
+  if (!service) return res.status(404).json({ error: 'Servicio no encontrado' });
   const result = await pool.query(
-    `insert into bookings (client_id, service_id, specialist_id, starts_at, duration_minutes, price, payment_method, deposit_amount, quote_snapshot)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning *`,
-    [req.user.id, serviceId, specialistId || null, startsAt, service.duration, quote?.price || service.price, paymentMethod || 'local', depositAmount || 0, quote || null]
+    `insert into bookings (user_id, service_id, specialist_id, quote_id, starts_at, duration_minutes, price, notes)
+     values ($1,$2,$3,$4,$5,$6,$7,$8) returning *`,
+    [req.user.id, serviceId, specialistId || null, quoteId || null, startsAt, service.duration_minutes, service.base_price, notes || null]
   );
   res.status(201).json(result.rows[0]);
 });
 
-app.get('/api/admin/reports', auth, (_, res) => {
+app.get('/api/admin/reports', auth, requireRole('SA', 'OWNER'), (_, res) => {
   res.json({ todayBookings: 18, monthlyRevenue: 12450, topService: 'Gel permanente', aiInsight: 'La demanda sube viernes y sábado; lanzar promoción de Soft Gel los martes puede equilibrar la agenda.' });
 });
 
