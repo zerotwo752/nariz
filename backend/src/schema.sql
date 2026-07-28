@@ -192,3 +192,26 @@ create index if not exists idx_bookings_user on bookings(user_id);
 create index if not exists idx_bookings_specialist on bookings(specialist_id);
 create index if not exists idx_bookings_starts_at on bookings(starts_at);
 create index if not exists idx_payments_booking on payments(booking_id);
+
+create table if not exists app_settings (
+  key text primary key,
+  value text,
+  updated_by bigint references users(id),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists worker_attendance (
+  id bigserial primary key,
+  specialist_id bigint not null references specialists(id) on delete cascade,
+  user_id bigint not null references users(id),
+  work_date date not null,
+  scheduled_start time not null,
+  check_in_at timestamptz not null,
+  ip_address text,
+  late_seconds integer not null default 0,
+  created_at timestamptz not null default now(),
+  unique (specialist_id, work_date)
+);
+
+create index if not exists idx_worker_attendance_date on worker_attendance(work_date);
+
