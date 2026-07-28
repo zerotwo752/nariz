@@ -14,6 +14,7 @@ const PORT = process.env.PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
 
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',') || '*' }));
+app.set('trust proxy', true);
 app.use(express.json({ limit: '2mb' }));
 
 
@@ -72,6 +73,21 @@ function orderStatusForPayment(method) {
 }
 function generateOrderCode() { return `NB-${crypto.randomBytes(3).toString('hex').toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`; }
 function normalizeOrder(row) { return { ...row, items: Array.isArray(row.items) ? row.items : [] }; }
+function clientIp(req) {
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return (forwarded || req.ip || req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+}
+function lateText(seconds) {
+  const total = Math.max(0, Number(seconds || 0));
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  return `${String(minutes).padStart(2, '0')} min ${String(rest).padStart(2, '0')} seg`;
+}
+async function attendanceSettings(req) {
+  const currentIp = clientIp(req);
+  const row = (await pool.query('select value from app_settings where key=$1', ['attendance_allowed_ip'])).rows[0];
+  return { currentIp, allowedIp: row?.value || null };
+}
 
 
 function requireRole(...roles) {
@@ -284,6 +300,45 @@ app.delete('/api/admin/services/:id', auth, requireRole('SA', 'OWNER'), async (r
   const result = await pool.query('update services set is_active=false where id=$1 returning *', [req.params.id]);
   if (!result.rowCount) return res.status(404).json({ error: 'Servicio no encontrado' });
   res.json({ ok: true });
+});
+
+
+app.get('/api/admin/attendance/settings', auth, requireRole('SA', 'OWNER'), async (req, res) => {
+  res.json(await attendanceSettings(req));
+});
+
+app.post('/api/admin/attendance/settings/use-current-ip', auth, requireRole('SA', 'OWNER'), async (req, res) => {
+  const ip = clientIp(req);
+  if (!ip) return res.status(400).json({ error: 'No se pudo detectar la IP actual' });
+  await pool.query(`insert into app_settings (key, value, updated_by, updated_at) values ('attendance_allowed_ip',$1,$2,now())
+    on conflict (key) do update set value=excluded.value, updated_by=excluded.updated_by, updated_at=now()`, [ip, req.user.id]);
+  res.json(await attendanceSettings(req));
+});
+
+app.get('/api/attendance/today', auth, requireRole('WORKER'), async (req, res) => {
+  const settings = await attendanceSettings(req);
+  const sp = (await pool.query('select * from specialists where user_id=$1 and is_active=true', [req.user.id])).rows[0];
+  if (!sp) return res.status(404).json({ error: 'No tienes perfil de trabajadora activo' });
+  const att = (await pool.query('select * from worker_attendance where specialist_id=$1 and work_date=current_date', [sp.id])).rows[0];
+  res.json({ workStart: String(sp.work_start).slice(0,5), workEnd: String(sp.work_end).slice(0,5), checkInAt: att?.check_in_at || null, lateSeconds: att?.late_seconds || 0, lateText: lateText(att?.late_seconds || 0), currentIp: settings.currentIp, allowedIpConfigured: Boolean(settings.allowedIp) });
+});
+
+app.post('/api/attendance/check-in', auth, requireRole('WORKER'), async (req, res) => {
+  const settings = await attendanceSettings(req);
+  if (!settings.allowedIp) return res.status(409).json({ error: 'La dueña aún no configuró la IP válida del local para asistencia' });
+  if (settings.currentIp !== settings.allowedIp) return res.status(403).json({ error: 'Tienes que estar en el local y conectada a la red WiFi autorizada para marcar asistencia' });
+  const sp = (await pool.query('select * from specialists where user_id=$1 and is_active=true', [req.user.id])).rows[0];
+  if (!sp) return res.status(404).json({ error: 'No tienes perfil de trabajadora activo' });
+  const now = new Date();
+  const [h, m] = String(sp.work_start).slice(0,5).split(':').map(Number);
+  const scheduled = new Date(now);
+  scheduled.setHours(h, m, 0, 0);
+  const lateSecondsValue = Math.max(0, Math.floor((now.getTime() - scheduled.getTime()) / 1000));
+  const result = await pool.query(`insert into worker_attendance (specialist_id,user_id,work_date,scheduled_start,check_in_at,ip_address,late_seconds)
+    values ($1,$2,current_date,$3,now(),$4,$5)
+    on conflict (specialist_id, work_date) do update set check_in_at=worker_attendance.check_in_at returning *`, [sp.id, req.user.id, sp.work_start, settings.currentIp, lateSecondsValue]);
+  const att = result.rows[0];
+  res.json({ workStart: String(sp.work_start).slice(0,5), workEnd: String(sp.work_end).slice(0,5), checkInAt: att.check_in_at, lateSeconds: att.late_seconds, lateText: lateText(att.late_seconds), currentIp: settings.currentIp, allowedIpConfigured: true });
 });
 
 app.get('/api/admin/revenue', auth, requireRole('SA', 'OWNER'), async (_, res) => {
