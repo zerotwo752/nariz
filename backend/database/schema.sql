@@ -84,10 +84,46 @@ create table if not exists products (
   description text,
   category text not null,
   price numeric(10,2) not null default 0,
-  stock integer not null default 0,
+  stock integer not null default 0 check (stock >= 0),
+  image_url text,
   is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table products add column if not exists image_url text;
+alter table products add column if not exists updated_at timestamptz not null default now();
+alter table products drop constraint if exists products_stock_check;
+alter table products add constraint products_stock_check check (stock >= 0);
+
+create table if not exists product_orders (
+  id bigserial primary key,
+  code varchar(18) unique not null,
+  user_id bigint not null references users(id),
+  payment_method_id bigint references payment_methods(id),
+  total numeric(10,2) not null default 0,
+  currency char(3) not null default 'PEN',
+  status text not null default 'pending' check (status in ('pending','paid','ready','delivered','cancelled')),
+  payment_reference text,
+  paid_at timestamptz,
+  delivered_by bigint references users(id),
+  delivered_at timestamptz,
   created_at timestamptz not null default now()
 );
+
+create table if not exists product_order_items (
+  id bigserial primary key,
+  order_id bigint not null references product_orders(id) on delete cascade,
+  product_id bigint references products(id),
+  product_name text not null,
+  unit_price numeric(10,2) not null,
+  quantity integer not null check (quantity > 0),
+  subtotal numeric(10,2) not null
+);
+
+create index if not exists idx_product_orders_user on product_orders(user_id);
+create index if not exists idx_product_orders_code on product_orders(code);
+create index if not exists idx_product_order_items_order on product_order_items(order_id);
 
 create table if not exists payment_methods (
   id bigserial primary key,

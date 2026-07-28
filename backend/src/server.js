@@ -41,6 +41,13 @@ function generatePassword() { return `Nb-${crypto.randomBytes(3).toString('hex')
 function slugify(value) { return String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || crypto.randomBytes(4).toString('hex'); }
 function publicUser(user) { return { id: user.id, dni: user.dni, full_name: user.full_name, role: user.role_code, loyalty_points: user.loyalty_points, is_active: user.is_active }; }
 
+function orderStatusForPayment(method) {
+  const code = String(method?.code || '').toLowerCase();
+  return code.includes('cash') || code.includes('local') || code.includes('tienda') ? 'pending' : 'paid';
+}
+function generateOrderCode() { return `NB-${crypto.randomBytes(3).toString('hex').toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`; }
+function normalizeOrder(row) { return { ...row, items: Array.isArray(row.items) ? row.items : [] }; }
+
 
 function requireRole(...roles) {
   return (req, res, next) => {
@@ -70,6 +77,91 @@ app.get('/api/categories', async (_, res) => {
 app.get('/api/payment-methods', async (_, res) => {
   const result = await pool.query('select id, code, name, provider, requires_reference from payment_methods where is_active=true order by id');
   res.json(result.rows);
+});
+
+
+app.get('/api/products', async (_, res) => {
+  const result = await pool.query('select id, sku, name, description, category, price, stock, image_url from products where is_active=true order by category, name');
+  res.json(result.rows);
+});
+
+app.get('/api/admin/products', auth, requireRole('SA', 'OWNER'), async (_, res) => {
+  const result = await pool.query('select * from products where is_active=true order by created_at desc');
+  res.json(result.rows);
+});
+
+app.post('/api/admin/products', auth, requireRole('SA', 'OWNER'), upload.single('image'), async (req, res) => {
+  const { name, description, category = 'Tienda', price, stock = 0 } = req.body;
+  if (!name || price === undefined || price === '') return res.status(400).json({ error: 'Nombre y precio son obligatorios' });
+  if (Number(price) < 0 || Number(stock) < 0) return res.status(400).json({ error: 'Precio y stock no pueden ser negativos' });
+  const sku = `${slugify(name).toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+  const imageUrl = req.file ? `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}` : null;
+  const result = await pool.query('insert into products (sku,name,description,category,price,stock,image_url) values ($1,$2,$3,$4,$5,$6,$7) returning *', [sku, name, description || null, category || 'Tienda', price, stock, imageUrl]);
+  res.status(201).json(result.rows[0]);
+});
+
+app.patch('/api/admin/products/:id', auth, requireRole('SA', 'OWNER'), upload.single('image'), async (req, res) => {
+  const { name, description, category, price, stock, isActive } = req.body;
+  const current = await pool.query('select * from products where id=$1', [req.params.id]);
+  if (!current.rowCount) return res.status(404).json({ error: 'Producto no encontrado' });
+  if ((price !== undefined && price !== '' && Number(price) < 0) || (stock !== undefined && stock !== '' && Number(stock) < 0)) return res.status(400).json({ error: 'Precio y stock no pueden ser negativos' });
+  const imageUrl = req.file ? `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}` : null;
+  const activeValue = typeof isActive === 'boolean' ? isActive : (isActive === 'false' ? false : null);
+  const result = await pool.query(`update products set name=coalesce($1,name), description=coalesce($2,description), category=coalesce($3,category), price=coalesce($4,price), stock=coalesce($5,stock), image_url=coalesce($6,image_url), is_active=coalesce($7,is_active), updated_at=now() where id=$8 returning *`, [name || null, description || null, category || null, price === undefined || price === '' ? null : price, stock === undefined || stock === '' ? null : stock, imageUrl, activeValue, req.params.id]);
+  res.json(result.rows[0]);
+});
+
+app.delete('/api/admin/products/:id', auth, requireRole('SA', 'OWNER'), async (req, res) => {
+  const result = await pool.query('update products set is_active=false, updated_at=now() where id=$1 returning *', [req.params.id]);
+  if (!result.rowCount) return res.status(404).json({ error: 'Producto no encontrado' });
+  res.json({ ok: true });
+});
+
+app.get('/api/store/orders', auth, async (req, res) => {
+  const isAdmin = req.user.role === 'SA' || req.user.role === 'OWNER';
+  const isWorker = req.user.role === 'WORKER';
+  const result = await pool.query(`select o.*, u.full_name as customer_name, pm.name as payment_method, dw.full_name as delivered_by_name,
+      coalesce(json_agg(json_build_object('id', i.id, 'product_id', i.product_id, 'product_name', i.product_name, 'unit_price', i.unit_price, 'quantity', i.quantity, 'subtotal', i.subtotal) order by i.id) filter (where i.id is not null), '[]') as items
+    from product_orders o join users u on u.id=o.user_id left join payment_methods pm on pm.id=o.payment_method_id left join users dw on dw.id=o.delivered_by left join product_order_items i on i.order_id=o.id
+    where ($1::boolean or $2::boolean or o.user_id=$3)
+    group by o.id, u.full_name, pm.name, dw.full_name order by o.created_at desc`, [isAdmin, isWorker, req.user.id]);
+  res.json(result.rows.map(normalizeOrder));
+});
+
+app.post('/api/store/orders', auth, async (req, res) => {
+  const { items = [], paymentMethodId, paymentReference } = req.body;
+  if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'Agrega al menos un producto' });
+  if (!paymentMethodId) return res.status(400).json({ error: 'Selecciona un método de pago' });
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const method = (await client.query('select * from payment_methods where id=$1 and is_active=true', [paymentMethodId])).rows[0];
+    if (!method) throw Object.assign(new Error('Método de pago no encontrado'), { status: 404 });
+    let total = 0; const orderItems = [];
+    for (const item of items) {
+      const qty = Math.max(1, Number(item.quantity || 1));
+      const product = (await client.query('select * from products where id=$1 and is_active=true for update', [item.productId])).rows[0];
+      if (!product) throw Object.assign(new Error('Producto no encontrado'), { status: 404 });
+      if (Number(product.stock) < qty) throw Object.assign(new Error(`Stock insuficiente para ${product.name}`), { status: 409 });
+      const subtotal = Number(product.price) * qty; total += subtotal;
+      orderItems.push({ product, qty, subtotal });
+      await client.query('update products set stock=stock-$1, updated_at=now() where id=$2', [qty, product.id]);
+    }
+    let code; for (let i=0;i<5;i++){ const candidate=generateOrderCode(); const exists=await client.query('select 1 from product_orders where code=$1',[candidate]); if(!exists.rowCount){ code=candidate; break; } }
+    if (!code) throw new Error('No se pudo generar el código de compra');
+    const status = orderStatusForPayment(method);
+    const order = (await client.query('insert into product_orders (code,user_id,payment_method_id,total,status,payment_reference,paid_at) values ($1,$2,$3,$4,$5,$6,case when $5=$$paid$$ then now() else null end) returning *', [code, req.user.id, paymentMethodId, total, status, paymentReference || null])).rows[0];
+    for (const oi of orderItems) await client.query('insert into product_order_items (order_id,product_id,product_name,unit_price,quantity,subtotal) values ($1,$2,$3,$4,$5,$6)', [order.id, oi.product.id, oi.product.name, oi.product.price, oi.qty, oi.subtotal]);
+    await client.query('commit');
+    res.status(201).json(order);
+  } catch (e) { await client.query('rollback'); res.status(e.status || 500).json({ error: e.message || 'No se pudo crear la compra' }); }
+  finally { client.release(); }
+});
+
+app.post('/api/store/orders/:code/deliver', auth, requireRole('SA', 'OWNER', 'WORKER'), async (req, res) => {
+  const result = await pool.query(`update product_orders set status='delivered', delivered_by=$1, delivered_at=now() where upper(code)=upper($2) and status <> 'cancelled' returning *`, [req.user.id, req.params.code]);
+  if (!result.rowCount) return res.status(404).json({ error: 'Compra no encontrada o cancelada' });
+  res.json(result.rows[0]);
 });
 
 app.get('/api/specialists', async (req, res) => {
