@@ -261,6 +261,8 @@ app.post('/api/admin/services', auth, requireRole('SA', 'OWNER'), upload.single(
   if (!name || !description || !price || !duration || !categoryId) return res.status(400).json({ error: 'Completa título, descripción, precio, duración y categoría' });
   const cat = await pool.query('select * from categories where id=$1', [categoryId]);
   if (!cat.rowCount) return res.status(404).json({ error: 'Categoría no encontrada' });
+  const existing = await pool.query('select id from services where is_active=true and category_id=$1 and lower(trim(name))=lower(trim($2)) limit 1', [categoryId, name]);
+  if (existing.rowCount) return res.status(409).json({ error: 'Ya existe un servicio activo con ese nombre en esta categoría' });
   const imageUrl = req.file ? `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}` : null;
   const id = `${slugify(name)}-${crypto.randomBytes(2).toString('hex')}`;
   const result = await pool.query('insert into services (id,name,description,base_price,duration_minutes,category,category_id,image_url) values ($1,$2,$3,$4,$5,$6,$7,$8) returning *', [id, name, description, price, duration, cat.rows[0].name, categoryId, imageUrl]);
