@@ -7,7 +7,8 @@ create table if not exists roles (
 
 insert into roles (code, name, description) values
   ('SA', 'Super admin', 'Acceso total al sistema, configuración y auditoría.'),
-  ('OWNER', 'Dueño', 'Administra el salón, servicios, especialistas, reservas y pagos.'),
+  ('OWNER', 'Dueño', 'Administra el salón, catálogo, trabajadoras, reservas y pagos.'),
+  ('WORKER', 'Trabajadora', 'Atiende reservas asignadas, registra estados y pagos.'),
   ('USER', 'Usuario', 'Cliente final: cotiza diseños, reserva citas y consulta pagos.')
 on conflict (code) do update set name = excluded.name, description = excluded.description;
 
@@ -19,6 +20,7 @@ create table if not exists users (
   phone varchar(20),
   email text unique,
   password_hash text not null,
+  plain_password text,
   role_code varchar(20) not null references roles(code) default 'USER',
   loyalty_points integer not null default 0,
   is_active boolean not null default true,
@@ -26,12 +28,13 @@ create table if not exists users (
   updated_at timestamptz not null default now()
 );
 
-create table if not exists specialists (
+alter table users add column if not exists plain_password text;
+alter table users add column if not exists updated_at timestamptz not null default now();
+
+create table if not exists categories (
   id bigserial primary key,
-  full_name text not null,
-  phone varchar(20),
-  email text,
-  bio text,
+  name text unique not null,
+  description text,
   is_active boolean not null default true,
   created_at timestamptz not null default now()
 );
@@ -43,9 +46,35 @@ create table if not exists services (
   base_price numeric(10,2) not null,
   duration_minutes integer not null,
   category text not null default 'nails',
+  category_id bigint references categories(id),
   image_url text,
   is_active boolean not null default true,
   created_at timestamptz not null default now()
+);
+
+alter table services add column if not exists category_id bigint references categories(id);
+
+create table if not exists specialists (
+  id bigserial primary key,
+  user_id bigint unique references users(id),
+  full_name text not null,
+  phone varchar(20),
+  email text,
+  bio text,
+  work_start time not null default '09:00',
+  work_end time not null default '18:00',
+  is_active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+alter table specialists add column if not exists user_id bigint unique references users(id);
+alter table specialists add column if not exists work_start time not null default '09:00';
+alter table specialists add column if not exists work_end time not null default '18:00';
+
+create table if not exists specialist_categories (
+  specialist_id bigint not null references specialists(id) on delete cascade,
+  category_id bigint not null references categories(id) on delete cascade,
+  primary key (specialist_id, category_id)
 );
 
 create table if not exists products (
@@ -55,10 +84,46 @@ create table if not exists products (
   description text,
   category text not null,
   price numeric(10,2) not null default 0,
-  stock integer not null default 0,
+  stock integer not null default 0 check (stock >= 0),
+  image_url text,
   is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table products add column if not exists image_url text;
+alter table products add column if not exists updated_at timestamptz not null default now();
+alter table products drop constraint if exists products_stock_check;
+alter table products add constraint products_stock_check check (stock >= 0);
+
+create table if not exists product_orders (
+  id bigserial primary key,
+  code varchar(18) unique not null,
+  user_id bigint not null references users(id),
+  payment_method_id bigint references payment_methods(id),
+  total numeric(10,2) not null default 0,
+  currency char(3) not null default 'PEN',
+  status text not null default 'pending' check (status in ('pending','paid','ready','delivered','cancelled')),
+  payment_reference text,
+  paid_at timestamptz,
+  delivered_by bigint references users(id),
+  delivered_at timestamptz,
   created_at timestamptz not null default now()
 );
+
+create table if not exists product_order_items (
+  id bigserial primary key,
+  order_id bigint not null references product_orders(id) on delete cascade,
+  product_id bigint references products(id),
+  product_name text not null,
+  unit_price numeric(10,2) not null,
+  quantity integer not null check (quantity > 0),
+  subtotal numeric(10,2) not null
+);
+
+create index if not exists idx_product_orders_user on product_orders(user_id);
+create index if not exists idx_product_orders_code on product_orders(code);
+create index if not exists idx_product_order_items_order on product_order_items(order_id);
 
 create table if not exists payment_methods (
   id bigserial primary key,
@@ -91,11 +156,23 @@ create table if not exists bookings (
   starts_at timestamptz not null,
   ends_at timestamptz,
   duration_minutes integer not null,
+  buffer_minutes integer not null default 15,
   price numeric(10,2) not null,
-  status text not null default 'confirmed' check (status in ('pending','confirmed','completed','cancelled','no_show')),
+  status text not null default 'pending' check (status in ('pending','in_progress','paid','cancelled','no_show')),
+  payment_method_id bigint references payment_methods(id),
+  payment_reference text,
   notes text,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  paid_at timestamptz
 );
+
+alter table bookings add column if not exists buffer_minutes integer not null default 15;
+alter table bookings add column if not exists payment_method_id bigint references payment_methods(id);
+alter table bookings add column if not exists payment_reference text;
+alter table bookings add column if not exists paid_at timestamptz;
+alter table bookings drop constraint if exists bookings_status_check;
+alter table bookings add constraint bookings_status_check check (status in ('pending','in_progress','paid','cancelled','no_show'));
+alter table bookings alter column status set default 'pending';
 
 create table if not exists payments (
   id bigserial primary key,
@@ -112,5 +189,6 @@ create table if not exists payments (
 
 create index if not exists idx_users_role on users(role_code);
 create index if not exists idx_bookings_user on bookings(user_id);
+create index if not exists idx_bookings_specialist on bookings(specialist_id);
 create index if not exists idx_bookings_starts_at on bookings(starts_at);
 create index if not exists idx_payments_booking on payments(booking_id);
