@@ -39,9 +39,9 @@ npm --workspace backend run dev
 
 ## Base de datos
 
-La carpeta `backend/database` contiene las tablas y datos iniciales para login, roles, productos, servicios, reservas y pagos.
+La carpeta `backend/database` contiene el esquema, el seed seguro de arranque y un script manual de limpieza.
 
-El backend ahora crea/actualiza las tablas automáticamente al iniciar (`npm run backend:dev` o `npm start`). Solo asegúrate de que `DATABASE_URL` apunte a tu base de datos Neon correcta. Si quieres ejecutar la inicialización manualmente, usa:
+El backend crea/actualiza las tablas automáticamente al iniciar (`npm run backend:dev` o `npm start`) y ejecuta `backend/database/seed.sql`. Ese seed es seguro para uso normal: no borra reservas, servicios, productos, clientas ni trabajadoras existentes; solo intenta crear catálogos mínimos y cuentas iniciales si todavía no existen. Si quieres ejecutar la inicialización manualmente, usa:
 
 ```bash
 npm --workspace backend run db:init
@@ -56,10 +56,18 @@ psql "$DATABASE_URL" -f backend/database/schema.sql
 psql "$DATABASE_URL" -f backend/database/seed.sql
 ```
 
-Roles iniciales:
+### Limpieza manual de Neon una sola vez
 
-- `SA`: súper admin.
-- `OWNER`: dueño del salón.
-- `USER`: cliente/usuario final.
+Si quieres borrar a mano los datos actuales de Neon y empezar limpio, ejecuta **una sola vez**:
 
-> Usuarios demo: `00000001` / `Admin123!`, `00000002` / `Duena123!`, `00000003` / `Andrea123!`.
+```bash
+psql "$DATABASE_URL" -f backend/database/manual-clean-reset.sql
+```
+
+Ese script borra catálogos de servicios, tienda virtual, reservas en cualquier estado, pagos, cotizaciones, trabajadoras/especialistas y usuarios existentes. Después deja únicamente estas cuentas:
+
+- `SA` / `SA`: súper admin.
+- `Dueña` / `Dueña`: dueña del salón.
+- `Cliente` / `Cliente`: cliente inicial.
+
+No dejes ese script configurado en el arranque de la app; úsalo solo desde la consola cuando quieras reiniciar la data manualmente.
