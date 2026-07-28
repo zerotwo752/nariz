@@ -242,10 +242,24 @@ app.patch('/api/admin/workers/:id', auth, requireRole('SA', 'OWNER'), async (req
   const { fullName, birthDate, phone, email, workStart, workEnd, isActive, categoryIds } = req.body;
   const current = await pool.query('select * from specialists where id=$1', [req.params.id]);
   if (!current.rowCount) return res.status(404).json({ error: 'Trabajadora no encontrada' });
-  const result = await pool.query(`update specialists set full_name=coalesce($1,full_name), phone=coalesce($2,phone), email=coalesce($3,email), work_start=coalesce($4,work_start), work_end=coalesce($5,work_end), is_active=coalesce($6,is_active) where id=$7 returning *`, [fullName || null, phone || null, email || null, workStart || null, workEnd || null, typeof isActive === 'boolean' ? isActive : null, req.params.id]);
-  await pool.query('update users set full_name=$1, birth_date=coalesce($2,birth_date), phone=$3, email=$4, is_active=$5 where id=$6', [result.rows[0].full_name, birthDate || null, result.rows[0].phone, result.rows[0].email, result.rows[0].is_active, result.rows[0].user_id]);
-  if (Array.isArray(categoryIds)) { await pool.query('delete from specialist_categories where specialist_id=$1', [req.params.id]); for (const id of categoryIds) await pool.query('insert into specialist_categories (specialist_id, category_id) values ($1,$2) on conflict do nothing', [req.params.id, id]); }
-  res.json(result.rows[0]);
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    const result = await client.query(`update specialists set full_name=coalesce($1,full_name), phone=coalesce($2,phone), email=coalesce($3,email), work_start=coalesce($4,work_start), work_end=coalesce($5,work_end), is_active=coalesce($6,is_active) where id=$7 returning *`, [fullName || null, phone || null, email || null, workStart || null, workEnd || null, typeof isActive === 'boolean' ? isActive : null, req.params.id]);
+    await client.query('update users set full_name=$1, birth_date=coalesce($2,birth_date), phone=$3, email=$4, is_active=$5 where id=$6', [result.rows[0].full_name, birthDate || null, result.rows[0].phone, result.rows[0].email, result.rows[0].is_active, result.rows[0].user_id]);
+    if (Array.isArray(categoryIds)) {
+      const cleanCategoryIds = [...new Set(categoryIds.map(Number).filter(Number.isInteger))];
+      await client.query('delete from specialist_categories where specialist_id=$1', [req.params.id]);
+      for (const id of cleanCategoryIds) await client.query('insert into specialist_categories (specialist_id, category_id) values ($1,$2) on conflict do nothing', [req.params.id, id]);
+    }
+    await client.query('commit');
+    res.json(result.rows[0]);
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
 });
 
 app.post('/api/admin/categories', auth, requireRole('SA', 'OWNER'), async (req, res) => {
