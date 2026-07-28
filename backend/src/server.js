@@ -37,7 +37,32 @@ function sign(user) {
 function addMinutes(date, minutes) { return new Date(date.getTime() + minutes * 60000); }
 function toMinutes(time) { const [h, m] = String(time).slice(0,5).split(':').map(Number); return h * 60 + m; }
 function timeFromMinutes(minutes) { return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`; }
-function generatePassword() { return `Nb-${crypto.randomBytes(3).toString('hex')}-${Math.floor(100 + Math.random() * 900)}`; }
+function normalizeText(value) { return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, ''); }
+function nameParts(fullName) { return normalizeText(fullName).trim().split(/\s+/).filter(Boolean); }
+function generateWorkerPassword(fullName, birthDate) {
+  const parts = nameParts(fullName);
+  const lastName = parts.length > 1 ? parts[parts.length - 1] : parts[0];
+  const cleanLastName = String(lastName || 'Salon').replace(/[^a-z0-9]/gi, '') || 'Salon';
+  const prettyLastName = `${cleanLastName.charAt(0).toUpperCase()}${cleanLastName.slice(1).toLowerCase()}`;
+  const dateNumbers = String(birthDate || '').replace(/\D/g, '');
+  return `${prettyLastName}${dateNumbers.slice(-6)}`;
+}
+function workerUsernameBase(fullName) {
+  const parts = nameParts(fullName).map(part => part.replace(/[^a-z0-9]/gi, '').toLowerCase()).filter(Boolean);
+  const firstName = parts[0] || 'trabajadora';
+  const secondName = parts[1] || '';
+  return `${firstName}${secondName}`.slice(0, 12) || crypto.randomBytes(4).toString('hex');
+}
+async function generateWorkerUsername(fullName) {
+  const base = workerUsernameBase(fullName);
+  for (let i = 0; i < 100; i++) {
+    const suffix = i === 0 ? '' : String(i + 1);
+    const candidate = `${base.slice(0, 12 - suffix.length)}${suffix}`;
+    const exists = await pool.query('select 1 from users where lower(dni)=lower($1)', [candidate]);
+    if (!exists.rowCount) return candidate;
+  }
+  return `${base.slice(0, 8)}${crypto.randomBytes(2).toString('hex')}`;
+}
 function slugify(value) { return String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || crypto.randomBytes(4).toString('hex'); }
 function publicUser(user) { return { id: user.id, dni: user.dni, full_name: user.full_name, role: user.role_code, loyalty_points: user.loyalty_points, is_active: user.is_active }; }
 
@@ -178,31 +203,31 @@ app.get('/api/specialists', async (req, res) => {
 
 
 app.get('/api/admin/workers', auth, requireRole('SA', 'OWNER'), async (_, res) => {
-  const result = await pool.query(`select sp.*, u.dni, u.plain_password, u.is_active as user_active,
+  const result = await pool.query(`select sp.*, u.dni, u.birth_date, u.plain_password, u.is_active as user_active,
       coalesce(json_agg(distinct jsonb_build_object('id', c.id, 'name', c.name)) filter (where c.id is not null), '[]') as categories
     from specialists sp join users u on u.id=sp.user_id
     left join specialist_categories sc on sc.specialist_id=sp.id left join categories c on c.id=sc.category_id
-    group by sp.id, u.dni, u.plain_password, u.is_active order by sp.full_name`);
+    group by sp.id, u.dni, u.birth_date, u.plain_password, u.is_active order by sp.full_name`);
   res.json(result.rows);
 });
 
 app.post('/api/admin/workers', auth, requireRole('SA', 'OWNER'), async (req, res) => {
-  const { fullName, phone, email, workStart = '09:00', workEnd = '18:00', categoryIds = [] } = req.body;
-  if (!fullName || !phone) return res.status(400).json({ error: 'Nombre y celular son obligatorios' });
-  const password = generatePassword();
-  const dni = String(Date.now()).slice(-8);
-  const userResult = await pool.query(`insert into users (dni, full_name, phone, email, password_hash, plain_password, role_code) values ($1,$2,$3,$4,$5,$6,'WORKER') returning *`, [dni, fullName, phone, email || null, hashPassword(password), password]);
+  const { fullName, birthDate, phone, email, workStart = '09:00', workEnd = '18:00', categoryIds = [] } = req.body;
+  if (!fullName || !birthDate || !phone) return res.status(400).json({ error: 'Nombre, fecha de nacimiento y celular son obligatorios' });
+  const password = generateWorkerPassword(fullName, birthDate);
+  const dni = await generateWorkerUsername(fullName);
+  const userResult = await pool.query(`insert into users (dni, full_name, birth_date, phone, email, password_hash, plain_password, role_code) values ($1,$2,$3,$4,$5,$6,$7,'WORKER') returning *`, [dni, fullName, birthDate, phone, email || null, hashPassword(password), password]);
   const spResult = await pool.query(`insert into specialists (user_id, full_name, phone, email, work_start, work_end) values ($1,$2,$3,$4,$5,$6) returning *`, [userResult.rows[0].id, fullName, phone, email || null, workStart, workEnd]);
   for (const id of categoryIds) await pool.query('insert into specialist_categories (specialist_id, category_id) values ($1,$2) on conflict do nothing', [spResult.rows[0].id, id]);
   res.status(201).json({ ...spResult.rows[0], dni, plain_password: password });
 });
 
 app.patch('/api/admin/workers/:id', auth, requireRole('SA', 'OWNER'), async (req, res) => {
-  const { fullName, phone, email, workStart, workEnd, isActive, categoryIds } = req.body;
+  const { fullName, birthDate, phone, email, workStart, workEnd, isActive, categoryIds } = req.body;
   const current = await pool.query('select * from specialists where id=$1', [req.params.id]);
   if (!current.rowCount) return res.status(404).json({ error: 'Trabajadora no encontrada' });
   const result = await pool.query(`update specialists set full_name=coalesce($1,full_name), phone=coalesce($2,phone), email=coalesce($3,email), work_start=coalesce($4,work_start), work_end=coalesce($5,work_end), is_active=coalesce($6,is_active) where id=$7 returning *`, [fullName || null, phone || null, email || null, workStart || null, workEnd || null, typeof isActive === 'boolean' ? isActive : null, req.params.id]);
-  await pool.query('update users set full_name=$1, phone=$2, email=$3, is_active=$4 where id=$5', [result.rows[0].full_name, result.rows[0].phone, result.rows[0].email, result.rows[0].is_active, result.rows[0].user_id]);
+  await pool.query('update users set full_name=$1, birth_date=coalesce($2,birth_date), phone=$3, email=$4, is_active=$5 where id=$6', [result.rows[0].full_name, birthDate || null, result.rows[0].phone, result.rows[0].email, result.rows[0].is_active, result.rows[0].user_id]);
   if (Array.isArray(categoryIds)) { await pool.query('delete from specialist_categories where specialist_id=$1', [req.params.id]); for (const id of categoryIds) await pool.query('insert into specialist_categories (specialist_id, category_id) values ($1,$2) on conflict do nothing', [req.params.id, id]); }
   res.json(result.rows[0]);
 });
